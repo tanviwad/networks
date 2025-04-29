@@ -14,20 +14,12 @@ public class TCPServer {
     int mtu;
     int sws;
     String filename;
-    DatagramSocket Listensocket;
-    DatagramSocket SendSocket;  
-    
-    //
-    int seqNum = 0;
-    int nextAck = 0;
-    int prevAck = 0;
-    boolean connected = false;
-    boolean complete = false;
+    DatagramSocket socket;
 
-
-    InetAddress clientAddy;
-    int clientPort;
-
+    int ackNum = -1;
+    int seqNum = -1;
+    int expectedSeq = ackNum + 1;
+    int expectedAck = seqNum + 1;
 
     public TCPServer(int port, int mtu, int sws, String filename) {
         this.port = port;
@@ -35,8 +27,7 @@ public class TCPServer {
         this.sws = sws;
         this.filename = filename;
         try {
-            this.Listensocket =  new DatagramSocket(this.port);
-            this.SendSocket = new DatagramSocket();
+            this.socket =  new DatagramSocket(this.port);
         }catch(Exception e) {
             System.out.println("Unable to bind socket");
         }
@@ -74,20 +65,26 @@ public class TCPServer {
         while(true) { 
             byte[] p = new byte[mtu];
             DatagramPacket pack = new DatagramPacket(p, mtu);
-            Listensocket.receive(pack);
+            socket.receive(pack);
+
+
             
 
             // compute flags
             int flag = getFlag(p);
-            
             // if SYN
             if(flag == 2) { 
                 // compute seqNumber
                 int seq = getSequenceNumber(p);
                 
-                // send ack with 
+                // send ack with seq + 1;
+                // send syn with seqNum = 0
 
-            }else if(flag == 1) { 
+                seqNum = 0;
+
+
+            }else if(flag == 1) {
+                // 
 
             }else if(flag == 0) {
 
@@ -96,19 +93,5 @@ public class TCPServer {
             }
             
     }
-
-}
-
-class ServerListen extends Thread { 
-
-    public void run() { 
-        while(true) { 
-
-        }
-    }
-}
-
-public class ServerSend extends Thread {
-
 
 }

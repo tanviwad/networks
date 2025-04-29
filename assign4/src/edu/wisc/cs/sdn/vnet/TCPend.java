@@ -149,10 +149,6 @@ public class TCPend {
             System.exit(-1);
         }
         
-
-        // determine ports based on number of args
-
-
         if (serverIP != null && serverPort > 0) {
             // Client mode
             System.out.println("Running in client mode");
