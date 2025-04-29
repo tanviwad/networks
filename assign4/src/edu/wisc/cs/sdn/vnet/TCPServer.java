@@ -40,10 +40,6 @@ public class TCPServer {
         }catch(Exception e) {
             System.out.println("Unable to bind socket");
         }
-        try {
-            init();    
-        } catch (IOException e) {
-        }
         
 
 
@@ -74,7 +70,7 @@ public class TCPServer {
 
     }
 
-    public void init() throws IOException {
+    public void run() throws IOException {
         while(true) { 
             byte[] p = new byte[mtu];
             DatagramPacket pack = new DatagramPacket(p, mtu);
@@ -88,6 +84,8 @@ public class TCPServer {
             if(flag == 2) { 
                 // compute seqNumber
                 int seq = getSequenceNumber(p);
+                
+                // send ack with 
 
             }else if(flag == 1) { 
 

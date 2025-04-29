@@ -24,83 +24,92 @@ public class TCPend {
 
 
     public static void server(int sPort, String filename, int mtu, int sws) {
+        
+        // receiver
+
+        // set up listening port on sPort
+
+        // once packet received
+        
 
 
-            
-    //     try{
-    //         DatagramSocket socket = new DatagramSocket(sPort);
-    //         FileOutputStream fout = new FileOutputStream(filename);
 
-    //         //udp socker, file to write received data, buffer for packets
-    //         //extra 24 is for the seq#, ack#, timestamp, length, flags and for the checksum
-    //         byte[] receiveBuffer = new byte[mtu + 24]; 
+        // try{
+        //     DatagramSocket socket = new DatagramSocket(sPort);
+        //     FileOutputStream fout = new FileOutputStream(filename);
+
+        //     //udp socker, file to write received data, buffer for packets
+        //     //extra 24 is for the seq#, ack#, timestamp, length, flags and for the checksum
+        //     byte[] receiveBuffer = new byte[mtu + 24]; 
 
 
-    //         int expectedSeqNum = 0;
-    //         boolean established = false;
-    //         boolean connClose = false;
-    //         //stats to display at end of testing
-    //         int dataBytesReceived = 0;
-    //         int packetsReveived = 0;
-    //         int packetsSent = 0;
-    //         int outOfOrder = 0;
-    //         int checksumErrors = 0;
-    //         int dupAcks = 0; //for fast recovery and fast re transmit
+        //     int expectedSeqNum = 0;
+        //     boolean established = false;
+        //     boolean connClose = false;
+        //     //stats to display at end of testing
+        //     int dataBytesReceived = 0;
+        //     int packetsReveived = 0;
+        //     int packetsSent = 0;
+        //     int outOfOrder = 0;
+        //     int checksumErrors = 0;
+        //     int dupAcks = 0; //for fast recovery and fast re transmit
 
-    //         System.out.println("Server listening on port " + sPort);
+        //     System.out.println("Server listening on port " + sPort);
 
-    //         InetAddress clientAddr = null;
-    //         int clientPort = dPort;
+        //     InetAddress clientAddr = null;
+        //     int clientPort = dPort;
 
-    //         while(!connClose){
-    //             DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
-    //             socket.receive(udpPacket);
-    //             if(clientAddr == null){
-    //                 clientAddr = udpPacket.getAddress();
-    //                 clientPort = udpPacket.getPort();
+        //     while(!connClose){
+        //         DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
+        //         socket.receive(udpPacket);
+        //         if(clientAddr == null){
+        //             clientAddr = udpPacket.getAddress();
+        //             clientPort = udpPacket.getPort();
                 
-    //             }
-    //             //server functinality
-    //         }
-    //         fout.close();
-    //         socket.close();
-    //         //stats
-    //         System.out.println("\nTransfer Statistics:");
-    //         System.out.println("Amount of Data received: " + dataBytesReceived + " bytes");
-    //         System.out.println("Number of packets sent: " + packetsSent);
-    //         System.out.println("Number of packets received: " + packetsReceived);
-    //         System.out.println("Number of out-of-sequence packets discarded: " + outOfOrder);
-    //         System.out.println("Number of packets discarded due to incorrect checksum: " + checksumErrors);
-    //         System.out.println("Number of duplicate acknowledgements: " + dupAcks);
+        //         }
+        //         //server functinality
+        //     }
+        //     fout.close();
+        //     socket.close();
+        //     //stats
+        //     System.out.println("\nTransfer Statistics:");
+        //     System.out.println("Amount of Data received: " + dataBytesReceived + " bytes");
+        //     System.out.println("Number of packets sent: " + packetsSent);
+        //     System.out.println("Number of packets received: " + packetsReceived);
+        //     System.out.println("Number of out-of-sequence packets discarded: " + outOfOrder);
+        //     System.out.println("Number of packets discarded due to incorrect checksum: " + checksumErrors);
+        //     System.out.println("Number of duplicate acknowledgements: " + dupAcks);
 
-    //     }catch(IOException e){
-    //         System.err.println("Server error" + e.getMessage());
-    //         e.printStackTrace();
+        // }catch(IOException e){
+        //     System.err.println("Server error" + e.getMessage());
+        //     e.printStackTrace();
 
-    //     }
-    // }
+        // }
 
-    // public static void client(int port, String serverIP, int serverPort, String filename, int mtu, int sws) {
-    //     //TODO inditial functionality
-    //     try {
-    //         // Create TCPSender instance for client functionality
-    //         TCPSender sender = new TCPSender(port, mtu, sws, serverIP, serverPort);
+
+    }
+
+    public static void client(int port, String serverIP, int serverPort, String filename, int mtu, int sws) {
+        //TODO inditial functionality
+        try {
+            // Create TCPSender instance for client functionality
+            TCPSender sender = new TCPSender(port, mtu, sws, serverIP, serverPort);
             
-    //         // Send the file
-    //         sender.sendFile(filename);
+            // Send the file
+            sender.sendFile(filename);
             
-    //         System.out.println("File transfer completed");
+            System.out.println("File transfer completed");
             
-    //     } catch (IOException e) {
-    //         System.err.println("Client error: " + e.getMessage());
-    //         e.printStackTrace();
-    //     }
+        } catch (IOException e) {
+            System.err.println("Client error: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     public static void main(String[] args) {
-        final int DEFAULT_PORT = 8888;
+        //final int DEFAULT_PORT = 8888;
 
-        int hostPort = DEFAULT_PORT;
+        int hostPort = -1;
         String serverIP = null;
         int serverPort = -1;
         String filename = null;
@@ -147,11 +156,16 @@ public class TCPend {
         if (serverIP != null && serverPort > 0) {
             // Client mode
             System.out.println("Running in client mode");
-            client(hostPort, serverIP, serverPort, filename, mtu, sws);
+            
         } else {
             // Server mode
             System.out.println("Running in server mode");
-            server(hostPort, filename, mtu, sws);
+            TCPServer server = new TCPServer(hostPort, mtu, sws, filename);
+            try { 
+                server.run();
+            }catch(IOException e) {
+                System.out.println("Error when trying to run server");
+            }
         }
 
     }
