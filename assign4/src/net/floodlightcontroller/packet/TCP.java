@@ -242,9 +242,9 @@ public class TCP extends BasePacket {
             return false;
         if (!(obj instanceof TCP))
             return false;
-        TCP other = (TCP) obj;
-        // May want to compare fields based on the flags set
-        return (checksum == other.checksum) &&
+            TCP other = (TCP) obj;
+            // May want to compare fields based on the flags set
+            return (checksum == other.checksum) &&
                (destinationPort == other.destinationPort) &&
                (sourcePort == other.sourcePort) &&
                (sequence == other.sequence) &&
