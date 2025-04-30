@@ -25,9 +25,6 @@ import java.util.Queue;
  * 2. Data transmission: read correct amount of bytes
  */
 public class TCPSender {
-    private static final byte SYN_FLAG = 0x4;
-    private static final byte ACK_FLAG = 0x1;
-    private static final byte FIN_FLAG = 0x2;
     private static final int MAX_RETRANSMISSIONS = 16;
     private static final int INITIAL_TIMEOUT = 5000; // 5 seconds
 
@@ -49,6 +46,7 @@ public class TCPSender {
 
     // Sliding window parameters
     private int mtu;
+    private int sws; // Window size in segments
     private int timeout = INITIAL_TIMEOUT; // Current timeout value
 
     // RTT estimation
@@ -68,66 +66,6 @@ public class TCPSender {
     private int duplicateAcks = 0;
     private int outOfSequenceDiscarded = 0;
     private int checksumErrors = 0;
-    
-    private class TCPPacket {
-        int seqNum;
-        int ackNum;
-        byte flags;
-        byte[] data;
-        long timestamp;
-        int retransmits;
-        short checksum;
-        
-        public TCPPacket(int seqNum, int ackNum, byte flags, byte[] data) {
-            this.seqNum = seqNum;
-            this.ackNum = ackNum;
-            this.flags = flags;
-            this.data = data;
-            this.timestamp = System.nanoTime();
-            this.retransmits = 0;
-            this.checksum = 0;
-        }
-        
-        //serialize the packet into a byte array
-        public byte[] serialize() {
-            int packetLength = 24; // Header size
-            if (data != null) {
-                packetLength += data.length;
-            }
-            
-            byte[] packetData = new byte[packetLength];
-            ByteBuffer bufByt = ByteBuffer.wrap(packetData);
-            
-            // Fill header fields
-            bufByt.putInt(seqNum);
-            bufByt.putInt(ackNum);
-            bufByt.putLong(timestamp);
-            
-            // Length and flags (length in upper 29 bits, flags in lower 3 bits)
-            int dataLength = (data != null) ? data.length : 0;
-            int lengthAndFlags = (dataLength << 3) | (flags & 0x7);
-            bufByt.putInt(lengthAndFlags);
-            
-            // Placeholder for checksum (will be filled in later)
-            bufByt.putShort((short)0);
-            
-            // Zero padding for the remaining 2 bytes
-            bufByt.putShort((short)0);
-            
-            // Add data if any
-            if (data != null && data.length > 0) {
-                bufByt.put(data);
-            }
-            
-            // Calculate checksum
-            this.checksum = calculateChecksum(packetData);
-            
-            // Update checksum in the packet
-            bufByt.putShort(20, this.checksum);
-            
-            return packetData;
-        }
-    }
 
     public TCPSender(int localPort, int mtu, int sws, String serverIP, int serverPort) throws IOException {
         this.socket = new DatagramSocket(localPort);
@@ -192,7 +130,7 @@ public class TCPSender {
         System.out.println("Establishing Connection...");
 
         //syn
-        TCPPacket synPacket = new TCPPacket(seqNum, 0, SYN_FLAG, null);
+        TCPPacket synPacket = new TCPPacket(seqNum, 0, System.nanoTime(), false, true, false, new byte[0]);
         sendPacket(synPacket);
         seqNum++;
         nextSeqNum = seqNum;
@@ -209,39 +147,30 @@ public class TCPSender {
                 socket.receive(udpPacket);
                 packetsReceived++;
                 
-                //get data from packets to update seq and ack number
-                ByteBuffer buf = ByteBuffer.wrap(udpPacket.getData(), 0, udpPacket.getLength());
-                int rcvSeqNum = buf.getInt();
-                int rcvAckNum = buf.getInt();
-                long timestamp = buf.getLong();
-                int lengthAndFlags = buf.getInt();
-                short checksum = buf.getShort();
-
-                //verify checksum
-                buf.position(buf.position() - 2);  // Move back to checksum position
-                buf.putShort((short)0);  // Set checksum to 0 for calculation
-                byte[] packetData = new byte[udpPacket.getLength()];
-                System.arraycopy(udpPacket.getData(), 0, packetData, 0, udpPacket.getLength());
-                short calculatedChecksum = calculateChecksum(packetData);
+                //deserialize packet using TCPPacket constructor
+                TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
                 
-                if (calculatedChecksum != checksum) {
+                //verify checksum
+                short receivedChecksum = receivedPacket.checksum;
+                receivedPacket.checksum = 0;
+                byte[] packetData = receivedPacket.toBytes();
+                short calculatedChecksum = receivedPacket.computeChecksum(packetData);
+                
+                if (calculatedChecksum != receivedChecksum) {
                     System.out.println("Checksum error in SYN-ACK");
                     checksumErrors++;
                     continue;
                 }
 
-                //extract flags
-                byte flags = (byte)(lengthAndFlags & 0x7);
-                
                 //log packet
-                logPacket("rcv", flags, rcvSeqNum, (lengthAndFlags >>> 3), rcvAckNum);
+                logPacket("rcv", receivedPacket);
                 
                 //check if SYN-ACK
-                if ((flags & (SYN_FLAG | ACK_FLAG)) == (SYN_FLAG | ACK_FLAG) && rcvAckNum == seqNum) {
-                    ackNum = rcvSeqNum + 1;  // SYN consumes one sequence number
+                if (receivedPacket.ack && receivedPacket.syn && receivedPacket.ackNum == seqNum) {
+                    ackNum = receivedPacket.seqNum + 1;  // SYN consumes one sequence number
                     
                     //send ACK
-                    TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, ACK_FLAG, null);
+                    TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                     sendPacket(ackPacket);
                     
                     connect = true;
@@ -250,7 +179,7 @@ public class TCPSender {
             } catch (SocketTimeoutException e) {
                 //retransmit SYN
                 System.out.println("Timeout, retransmitting SYN");
-                TCPPacket synPacket2 = new TCPPacket(seqNum - 1, 0, SYN_FLAG, null);
+                TCPPacket synPacket2 = new TCPPacket(seqNum - 1, 0, System.nanoTime(), false, true, false, new byte[0]);
                 sendPacket(synPacket2);
                 retransmissions++;
                 tries++;
@@ -262,7 +191,7 @@ public class TCPSender {
     
     //send data packet and add to unacked packets
     private void sendDataPacket(byte[] data) throws IOException {
-        TCPPacket packet = new TCPPacket(nextSeqNum, ackNum, ACK_FLAG, data);
+        TCPPacket packet = new TCPPacket(nextSeqNum, ackNum, System.nanoTime(), true, false, false, data);
         sendPacket(packet);
         
         //add to unacked packets
@@ -277,11 +206,8 @@ public class TCPSender {
     
     //send packet
     private void sendPacket(TCPPacket packet) throws IOException {
-        //update timestamp
-        packet.timestamp = System.nanoTime();
-        
         //serialize packet
-        byte[] packetData = packet.serialize();
+        byte[] packetData = packet.toBytes();
         
         //create UDP packet
         DatagramPacket udpPacket = new DatagramPacket(
@@ -292,8 +218,7 @@ public class TCPSender {
         packetsSent++;
         
         //log packet
-        logPacket("snd", packet.flags, packet.seqNum, 
-                 (packet.data != null) ? packet.data.length : 0, packet.ackNum);
+        logPacket("snd", packet);
     }
     
     //receive and process ACKs
@@ -305,42 +230,32 @@ public class TCPSender {
             socket.receive(udpPacket);
             packetsReceived++;
             
-            //parse packet
-            ByteBuffer buf = ByteBuffer.wrap(udpPacket.getData(), 0, udpPacket.getLength());
-            int rcvSeqNum = buf.getInt();
-            int rcvAckNum = buf.getInt();
-//            long timestamp = buf.getLong();
-            int lengthAndFlags = buf.getInt();
-            short checksum = buf.getShort();
+            //deserialize packet
+            TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
             
             //verify checksum
-            buf.position(buf.position() - 2);  //move back to checksum position
-            buf.putShort((short)0);  //set checksum to 0 for calculation
-            byte[] packetData = new byte[udpPacket.getLength()];
-            System.arraycopy(udpPacket.getData(), 0, packetData, 0, udpPacket.getLength());
-            short calculatedChecksum = calculateChecksum(packetData);
+            short receivedChecksum = receivedPacket.checksum;
+            receivedPacket.checksum = 0;
+            byte[] packetData = receivedPacket.toBytes();
+            short calculatedChecksum = receivedPacket.computeChecksum(packetData);
             
-            if (calculatedChecksum != checksum) {
+            if (calculatedChecksum != receivedChecksum) {
                 System.out.println("Checksum error in ACK");
                 checksumErrors++;
                 return true;  //we did receive a packet, even if it had errors
             }
             
-            //extract flags
-            byte flags = (byte)(lengthAndFlags & 0x7);
-            int dataLength = lengthAndFlags >>> 3;
-            
             //log packet
-            logPacket("rcv", flags, rcvSeqNum, dataLength, rcvAckNum);
+            logPacket("rcv", receivedPacket);
             
             //process ACK
-            if ((flags & ACK_FLAG) != 0) {
-                if (rcvAckNum > baseSeqNum) {
+            if (receivedPacket.ack) {
+                if (receivedPacket.ackNum > baseSeqNum) {
                     //since we got a new ACK, advance window
                     updateRTT(unackedPackets.get(baseSeqNum));
                     
                     //remove acknowledged packets
-                    for (int seq = baseSeqNum; seq < rcvAckNum; ) {
+                    for (int seq = baseSeqNum; seq < receivedPacket.ackNum; ) {
                         TCPPacket packet = unackedPackets.get(seq);
                         if (packet != null) {
                             unackedPackets.remove(seq);
@@ -351,7 +266,7 @@ public class TCPSender {
                     }
                     
                     //update base sequence number
-                    baseSeqNum = rcvAckNum;
+                    baseSeqNum = receivedPacket.ackNum;
                     
                     //reset duplicate ACK counter
                     duplicateAckCount = 0;
@@ -369,14 +284,12 @@ public class TCPSender {
                         }
                     } else {
                         // Congestion avoidance - additive increase
-                        // Increase window by roughly 1 segment per RTT
-                        // congestionWindow += (mtu - 24) * (mtu - 24) / congestionWindow;
                         congestionWindow += mtu - 24;
                     }
                     
                     System.out.println("Window updated - now " + congestionWindow + " bytes");
                     
-                } else if (rcvAckNum == baseSeqNum) {
+                } else if (receivedPacket.ackNum == baseSeqNum) {
                     //dup ACK
                     duplicateAckCount++;
                     duplicateAcks++;
@@ -424,9 +337,24 @@ public class TCPSender {
                 //check if max retransmissions reached
                 if (packet.retransmits < MAX_RETRANSMISSIONS) {
                     //retransmit
-                    sendPacket(packet);
+                    // Create a new packet with updated timestamp
+                    TCPPacket retransPacket = new TCPPacket(
+                        packet.seqNum, 
+                        packet.ackNum, 
+                        System.nanoTime(), 
+                        packet.ack, 
+                        packet.syn, 
+                        packet.fin, 
+                        packet.data
+                    );
+                    retransPacket.retransmits = packet.retransmits + 1;
+                    
+                    // Replace old packet in unacked map
+                    unackedPackets.put(packet.seqNum, retransPacket);
+                    
+                    // Send the packet
+                    sendPacket(retransPacket);
                     retransmissions++;
-                    packet.retransmits++;
                     
                     // if there's a timeout --> multiplicative decrease
                     congestionThreshold = congestionWindow / 2; 
@@ -446,7 +374,7 @@ public class TCPSender {
         System.out.println("Closing connection...");
         
         //create FIN packet
-        TCPPacket finPacket = new TCPPacket(seqNum, ackNum, FIN_FLAG, null);
+        TCPPacket finPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), false, false, true, new byte[0]);
         
         boolean closed = false;
         int attempts = 0;
@@ -463,41 +391,33 @@ public class TCPSender {
                 socket.receive(udpPacket);
                 packetsReceived++;
                 
-                //parse packet
-                ByteBuffer buf = ByteBuffer.wrap(udpPacket.getData(), 0, udpPacket.getLength());
-                int rcvSeqNum = buf.getInt();
-                int rcvAckNum = buf.getInt();
-                int lengthAndFlags = buf.getInt();
-                short checksum = buf.getShort();
+                //deserialize packet
+                TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
                 
                 //verify checksum
-                buf.position(buf.position() - 2);
-                buf.putShort((short)0);
-                byte[] packetData = new byte[udpPacket.getLength()];
-                System.arraycopy(udpPacket.getData(), 0, packetData, 0, udpPacket.getLength());
-                short calculatedChecksum = calculateChecksum(packetData);
+                short receivedChecksum = receivedPacket.checksum;
+                receivedPacket.checksum = 0;
+                byte[] packetData = receivedPacket.toBytes();
+                short calculatedChecksum = receivedPacket.computeChecksum(packetData);
                 
-                if (calculatedChecksum != checksum) {
+                if (calculatedChecksum != receivedChecksum) {
                     System.out.println("Checksum error in FIN-ACK");
                     checksumErrors++;
                     continue;
                 }
                 
-                //extract flags
-                byte flags = (byte)(lengthAndFlags & 0x7);
-                
                 //log packet
-                logPacket("rcv", flags, rcvSeqNum, (lengthAndFlags >>> 3), rcvAckNum);
+                logPacket("rcv", receivedPacket);
                 
                 //check for ACK of our FIN
-                if ((flags & ACK_FLAG) != 0 && rcvAckNum == seqNum) {
+                if (receivedPacket.ack && receivedPacket.ackNum == seqNum) {
                     //got ACK for our FIN
                     
                     //check if this is also a FIN from the server
-                    if ((flags & FIN_FLAG) != 0) {
+                    if (receivedPacket.fin) {
                         //this is a FIN-ACK, send ACK for the server's FIN
-                        ackNum = rcvSeqNum + 1;  //FIN consumes one sequence number
-                        TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, ACK_FLAG, null);
+                        ackNum = receivedPacket.seqNum + 1;  //FIN consumes one sequence number
+                        TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                         sendPacket(ackPacket);
                         closed = true;
                     } else {
@@ -506,10 +426,10 @@ public class TCPSender {
                     }
                 }
                 //if we got a separate FIN from the server
-                else if ((flags & FIN_FLAG) != 0) {
+                else if (receivedPacket.fin) {
                     //send ACK for the FIN
-                    ackNum = rcvSeqNum + 1;
-                    TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, ACK_FLAG, null);
+                    ackNum = receivedPacket.seqNum + 1;
+                    TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                     sendPacket(ackPacket);
                     closed = true;
                 }
@@ -517,6 +437,9 @@ public class TCPSender {
                 //retransmit FIN
                 System.out.println("Timeout, retransmitting FIN");
                 attempts++;
+                
+                // Create a new FIN packet with updated timestamp
+                finPacket = new TCPPacket(seqNum - 1, ackNum, System.nanoTime(), false, false, true, new byte[0]);
             }
         }
         
@@ -525,32 +448,6 @@ public class TCPSender {
         } else {
             System.out.println("WARNING: CHECK IF CONNECTION CLOSED");
         }
-    }
-    
-    //calculate one's complement checksum
-    private short calculateChecksum(byte[] data) {
-        //ensure even length
-        int length = data.length;
-        if (length % 2 != 0) {
-            byte[] paddedData = new byte[length + 1];
-            System.arraycopy(data, 0, paddedData, 0, length);
-            data = paddedData;
-            length++;
-        }
-        
-        //calculate sum
-        int sum = 0;
-        for (int i = 0; i < length; i += 2) {
-            int word = ((data[i] & 0xFF) << 8) | (data[i + 1] & 0xFF);
-            sum += word;
-            //add carry
-            if ((sum & 0xFFFF0000) > 0) {
-                sum = (sum & 0xFFFF) + 1;
-            }
-        }
-        
-        //one's complement
-        return (short) (~sum & 0xFFFF);
     }
     
     //update RTT estimates
@@ -579,28 +476,30 @@ public class TCPSender {
     }
     
     //log packet
-    private void logPacket(String action, byte flags, int seqNum, int dataLength, int ackNum) {
+    private void logPacket(String action, TCPPacket packet) {
         StringBuilder flagStr = new StringBuilder();
         
-        if ((flags & SYN_FLAG) != 0) flagStr.append("S ");
+        if (packet.syn) flagStr.append("S ");
         else flagStr.append("- ");
         
-        if ((flags & ACK_FLAG) != 0) flagStr.append("A ");
+        if (packet.ack) flagStr.append("A ");
         else flagStr.append("- ");
         
-        if ((flags & FIN_FLAG) != 0) flagStr.append("F ");
+        if (packet.fin) flagStr.append("F ");
         else flagStr.append("- ");
         
-        if (dataLength > 0) flagStr.append("D");
+        if (packet.data != null && packet.data.length > 0) flagStr.append("D");
         else flagStr.append("-");
+        
+        int dataLength = (packet.data != null) ? packet.data.length : 0;
         
         System.out.printf("%s %.3f %s %d %d %d\n", 
                           action, 
                           System.currentTimeMillis() / 1000.0, 
                           flagStr.toString(), 
-                          seqNum, 
+                          packet.seqNum, 
                           dataLength, 
-                          ackNum);
+                          packet.ackNum);
     }
     
     //print statistics
