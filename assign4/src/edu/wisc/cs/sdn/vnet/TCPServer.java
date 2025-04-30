@@ -20,15 +20,19 @@ public class TCPServer {
     DatagramSocket socket;
 
     int ackNum = -1;
-    int seqNum = -1;
+    int seqNum = 0;
     int expectedSeq = ackNum + 1;
     int expectedAck = seqNum + 1;
+
+    //packets buffer
+    Map<Integer, DatagramPacket> packetsBuffer;
 
     public TCPServer(int port, int mtu, int sws, String filename) {
         this.port = port;
         this.mtu = mtu;
         this.sws = sws;
         this.filename = filename;
+        packetsBuffer = new HashMap<>();
         try {
             this.socket =  new DatagramSocket(this.port);
         }catch(Exception e) {
@@ -74,45 +78,47 @@ public class TCPServer {
 
         // build packet
         try { 
+            int header_size = 24;
             // build TCP packet
-            byte[] packet = new byte[24];
-        
+            byte[] packet = new byte[header_size];
+            
+            ByteBuffer temp = ByteBuffer.allocate(header_size);
+
             // build seq Num
-            System.arraycopy(ByteBuffer.allocate(4).putInt(seqNum).array(), 0, packet, 0, 4);
-
+            temp.putInt(seqNum);
+            
             // build ack Num
-            System.arraycopy(ByteBuffer.allocate(4).putInt(ackNum).array(), 0, packet, 4, 4);
+            temp.putInt(ackNum);
 
+            
             // build timestamp
-            System.arraycopy(ByteBuffer.allocate(4).putLong(timestamp).array(), 0, packet, 8, 8);
-
+            temp.putLong(timestamp);
+            
             // build length
             int length = 0;
             length = length << 3;
             for(int f : flags) { 
-                int mask = 1 << f;
+                int mask = 1 << (f-1);
                 length = length| mask;
             }
-            System.arraycopy(ByteBuffer.allocate(4).putInt(length).array(), 0, packet, 16, 4);
+            temp.putInt(length);
 
-            // build zeroes array
-            ByteBuffer lastRow = ByteBuffer.allocate(12);
-
-            lastRow.put(new byte[10]);
-
-            // build checksum
-            short checksum = calcCheckSum(packet);
-            lastRow.putShort(checksum);
-
-            System.arraycopy(lastRow.array(), 0, packet, 20, 4);
             
-            // construct datagram packet
-            DatagramPacket p = new DatagramPacket(packet, packet.length);
+            // build zeroes array
+
+           temp.putInt(0);
+           short checksum = calcCheckSum(temp.array());
+           temp.getShort();
+           temp.putShort(checksum);
+           // construct datagram packet
+           DatagramPacket p = new DatagramPacket(packet, packet.length);
             
             p.setAddress(remoteAddr);
             p.setPort(remotePort);
             
             this.socket.send(p);
+            this.packetsBuffer.put(expectedAck, p);
+            
         
         }catch(Exception e) { 
             
@@ -168,7 +174,18 @@ public class TCPServer {
     // check checksum
     public boolean check(DatagramPacket pack) { 
 
-        return (calcCheckSum(pack.getData()) == getCheckSum(pack));
+        ByteBuffer p = ByteBuffer.wrap(pack.getData());
+    
+        //zero out checksum and calculate
+        short checksum = p.getShort(22);
+        p.putShort(22, (short)0);
+        short calc = calcCheckSum(p.array());
+        if(checksum == calc) { 
+            p.putShort(22, checksum);
+            return true;
+        }
+
+        return false;
     }
 
     public void run() throws IOException {
@@ -185,7 +202,7 @@ public class TCPServer {
             // compute flags
             int[] flag = getFlag(p);
             // if SYN
-            if(flag[0] == 0x4) { 
+            if(flag[0] == 3) { 
                 // compute seqNumber
                 int seq = getSequenceNumber(p);
                 
@@ -196,18 +213,26 @@ public class TCPServer {
                 InetAddress remoteAddr = pack.getAddress();
                 int remotePort = pack.getPort();
 
-                int [] flags = {3, 2, 1}
+                int [] flags = {3, 2, 1};
 
-                // send syn and 
-                sendPacket(seqNum, ackNum, timestamp, flag, remoteAddr, remotePort);
-
-
-
-            }else if(flag[1] == 0x2) {
+                // send syn and wait for ack, 5 second timer, resend this packet.
+                sendPacket(seqNum, ackNum, timestamp, flags, remoteAddr, remotePort);
+            }else if(flag[1] == 2) {
                 // FIN
 
-            }else if(flag[2] == 0x1 ) {
+                // send back an ack
+
+                // send ack with a different seqyence number based on FIN seq #
+
+
+            }else if(flag[2] == 1 ) {
                 // ACK
+
+                // get the ACK number
+                ByteBuffer buf = ByteBuffer.wrap(pack.getData());
+
+                // if ACK # is expecyed remove entry from map
+                if ()
 
             }else {
                 // improper packet
