@@ -105,25 +105,6 @@ public class TCPSender{
             
             return packetData;
         }
-        
-        //get flag string for logging
-        public String getFlagsString() {
-            StringBuilder sb = new StringBuilder();
-            
-            if ((flags & SYN_FLAG) != 0) sb.append("S ");
-            else sb.append("- ");
-            
-            if ((flags & ACK_FLAG) != 0) sb.append("A ");
-            else sb.append("- ");
-            
-            if ((flags & FIN_FLAG) != 0) sb.append("F ");
-            else sb.append("- ");
-            
-            if (data != null && data.length > 0) sb.append("D");
-            else sb.append("-");
-            
-            return sb.toString();
-        }
     }
 
     public TCPSender(int localPort, int mtu, int sws, String serverIP, int serverPort) throws IOException {
@@ -149,19 +130,18 @@ public class TCPSender{
         }
         
         FileInputStream fileIn = new FileInputStream(filename);
-        byte[] buffer = new byte[mtu - 24]; // Reserve header space
+        byte[] buffer = new byte[mtu - 24]; // header space
         int bytesRead;
         
         //send data
         while ((bytesRead = fileIn.read(buffer)) > 0) {
-            // Copy to prevent buffer reuse issues
-            byte[] data = new byte[bytesRead];
+            byte[] data = new byte[bytesRead]; //copy it for buffer reuse
             System.arraycopy(buffer, 0, data, 0, bytesRead);
             
             //wait until window allows sending
             while (nextSeqNum - baseSeqNum >= cwnd) {
                 if (!receiveAcks()) {
-                    // Check for retransmissions if no ACKs received
+                    //check for retransmissions if no ACKs received
                     checkForRetransmissions();
                 }
             }
@@ -199,7 +179,6 @@ public class TCPSender{
         
         while (!connect && tries < MAX_RETRANSMISSIONS) {
             try {
-                //Receive packet
                 byte[] receiveBuffer = new byte[mtu + 24];
                 DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
                 socket.receive(udpPacket);
@@ -331,8 +310,7 @@ public class TCPSender{
             
             //process ACK
             if ((flags & ACK_FLAG) != 0) {
-                if (rcvAckNum > baseSeqNum) {
-                    //New ACK, advance window
+                if (rcvAckNum > baseSeqNum) { //new ack so update the RTT
                     updateRTT(timestamp);
                     
                     //remove acknowledged packets
@@ -352,14 +330,13 @@ public class TCPSender{
                     //reset duplicate ACK counter
                     duplicateAcks = 0;
                 } else if (rcvAckNum == baseSeqNum) {
-                    //Duplicate ACK
+                    //dup ACK
                     duplicateAcks++;
                     
-                    //Fast retransmit after 3 duplicate ACKs
+                    //fast retransmit after 3 duplicate ACKs
                     if (duplicateAcks >= 3) {
-                        //Retransmit the first unacknowledged packet
-                        TCPPacket lostPacket = unackedPackets.get(baseSeqNum);
-                        if (lostPacket != null) {
+                        TCPPacket lostPacket = unackedPackets.get(baseSeqNum); 
+                        if (lostPacket != null) {//retransmit
                             System.out.println("Fast retransmit triggered by 3 duplicate ACKs");
                             sendPacket(lostPacket);
                             retransmissions++;
@@ -389,7 +366,6 @@ public class TCPSender{
             if ((currentTime - packet.timestamp) / 1_000_000 > timeout) {
                 //check if max retransmissions reached
                 if (packet.retransmits < MAX_RETRANSMISSIONS) {
-                    //retransmit
                     sendPacket(packet);
                     retransmissions++;
                     packet.retransmits++;
@@ -516,7 +492,6 @@ public class TCPSender{
     //update RTT estimates
     private void updateRTT(long timestamp) {
         //TODO: Implement RTT estimation using the EWMA method from the assignment
-        //Not essential for basic functionality
     }
     
     //log packet
