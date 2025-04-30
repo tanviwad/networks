@@ -226,6 +226,8 @@ public class TCPServer {
             while(true) { 
 
             }
+        }catch ( Exception e){
+            System.err.println("Error with getting syn packet");
         }
 
     }

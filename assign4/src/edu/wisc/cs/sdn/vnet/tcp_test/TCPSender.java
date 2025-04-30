@@ -1,43 +1,26 @@
-package edu.wisc.cs.sdn.vnet;
-
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
-import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.LinkedList;
-import java.util.Queue;
 
-
-
-/*
- * Header: 4 + 4 + 8 + 4 + 2 + 2 = 24 bytes
- * 1. client initialization: create port bound to local port, set server addr n port, init seq #s, set socket for retransmissions,
- * init the sliding window parameters
- * 2.establish connection: syn from us with seq#0 as we are establishing the connection, send to receiver and increase the sequence number
- * Receive syn + ack, if there's a timeout, retransmit the last SYN packet, if it comes back, then we verify the checksum and the correct 
- * flags set, and then verify the ACK matches our seqNum
- * Ack back to server with server's SeqNum + 1
- * 2. Data transmission: read correct amount of bytes
- */
 public class TCPSender {
     private static final int MAX_RETRANSMISSIONS = 16;
     private static final int INITIAL_TIMEOUT = 5000; // 5 seconds
 
-    //connection
+    // Connection
     private int seqNum = 0;
     private int ackNum = 0;
-    private int baseSeqNum = 0; //first unacked Byte
+    private int baseSeqNum = 0; // First unacked byte
     private int nextSeqNum = 0;
 
-    //congestion control
+    // Congestion control
     private int congestionWindow = 1; // Start with 1 MSS (Maximum Segment Size)
-    private int congestionThreshold; // ssthresh - transition point between slow start and CA
-    private boolean inSlowStart = true; // Track if we're in slow start or congestion avoidance
+    private int congestionThreshold = 65535; // ssthresh
+    private boolean inSlowStart = true; 
     private int duplicateAckCount = 0; // For fast retransmit
 
     private DatagramSocket socket;
@@ -56,9 +39,9 @@ public class TCPSender {
     private static final double BETA = 0.75;   // For EWMA of RTT variance
 
     // Packet storage
-    private Map<Integer, TCPPacket> unackedPackets = new HashMap<>(); //retransmissions
+    private Map<Integer, TCPPacket> unackedPackets = new HashMap<>();
 
-    //stats to display
+    // Stats to display
     private long dataSent = 0;
     private int packetsSent = 0;
     private int packetsReceived = 0;
@@ -74,83 +57,98 @@ public class TCPSender {
         this.mtu = mtu;
         this.sws = sws;
         
-        //init congestion control
-        this.congestionWindow = 1; // Start with 1 segment
-        this.congestionThreshold = 65535; //infinity as max
+        // Init congestion control
+        this.congestionWindow = mtu - 24; // Start with 1 segment
+        this.congestionThreshold = 65535; // Max as infinity
         
-        //timeout for socket
+        // Timeout for socket
         this.socket.setSoTimeout(timeout);
     }
 
     public void sendFile(String filename) throws IOException {
-        //3 way handshaeke
+        // 3-way handshake
         if (!establishConnection()) {
             System.err.println("Failed to establish connection");
             return;
         }
-        //being streaming of data
+        
+        // Begin streaming data
         System.out.println("Beginning to read data from file " + filename);
         FileInputStream fileIn = new FileInputStream(filename);
         byte[] buffer = new byte[mtu - 24]; 
+        System.out.println("created buffer");
         int bytesRead;
         
-        //send data
+        // Send data
         while ((bytesRead = fileIn.read(buffer)) > 0) {
             byte[] data = new byte[bytesRead];
             System.arraycopy(buffer, 0, data, 0, bytesRead);
             
-            //wait until window allows sending
+            // Wait until window allows sending
+            System.out.println("nextSeqNum: " + nextSeqNum + ", baseSeqNum: " + baseSeqNum + ", window: " + getEffectiveWindow());
             while ((nextSeqNum - baseSeqNum) >= getEffectiveWindow()) {
+                System.out.println("nextSeqNum: " + nextSeqNum + ", baseSeqNum: " + baseSeqNum + ", window: " + getEffectiveWindow());
+                System.out.println("Able to get effective Window");
                 if (!receiveAcks()) {
-                    //look for retransmissions if no ACKs received
+                    // Look for retransmissions if no ACKs received
+                    System.out.println("Looking for retranmissions - no Ack's received");
                     checkForRetransmissions();
                 }
             }  
             sendDataPacket(data);
             
-            //incoming ACKs
+            // Process incoming ACKs
             receiveAcks();
         }
+        System.out.println("done reading data");
         fileIn.close();
-        while (baseSeqNum < nextSeqNum) { //make sure we have all data
+        
+        // Make sure all data has been acknowledged
+        while (baseSeqNum < nextSeqNum) {
+            System.out.println("checking for ACKS");
             if (!receiveAcks()) {
                 checkForRetransmissions();
             }
         }
+        
         closeConnection();
         printStatistics();
     }
-
-    // we want the effective window size (minimum of congestion window and flow control window)
+    
+    // We want the effective window size (minimum of congestion window and flow control window)
     private int getEffectiveWindow() {
+        // If no bytes have been sent yet, allow at least one segment
+        if (baseSeqNum == 0 && nextSeqNum == 1) {
+            return mtu - 24; // One segment size
+        }
         return congestionWindow;
     }
 
     private boolean establishConnection() throws IOException {
         System.out.println("Establishing Connection...");
 
-        //syn
+        // Send SYN
         TCPPacket synPacket = new TCPPacket(seqNum, 0, System.nanoTime(), false, true, false, new byte[0]);
         sendPacket(synPacket);
         seqNum++;
         nextSeqNum = seqNum;
 
-        //syn + ack --> wait for server to send
+        // Wait for SYN+ACK from server
         int tries = 0;
         boolean connect = false;
         
         while (!connect && tries < MAX_RETRANSMISSIONS) {
             try {
-                //receive packet
+                // Receive packet
                 byte[] receiveBuffer = new byte[mtu + 24];
                 DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
                 socket.receive(udpPacket);
                 packetsReceived++;
                 
-                //deserialize packet using TCPPacket constructor
+                // Deserialize packet
                 TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
                 
-                //verify checksum
+                // Verify checksum
                 short receivedChecksum = receivedPacket.checksum;
                 receivedPacket.checksum = 0;
                 byte[] packetData = receivedPacket.toBytes();
@@ -162,14 +160,14 @@ public class TCPSender {
                     continue;
                 }
 
-                //log packet
+                // Log packet
                 logPacket("rcv", receivedPacket);
                 
-                //check if SYN-ACK
+                // Check if SYN-ACK
                 if (receivedPacket.ack && receivedPacket.syn && receivedPacket.ackNum == seqNum) {
                     ackNum = receivedPacket.seqNum + 1;  // SYN consumes one sequence number
                     
-                    //send ACK
+                    // Send ACK
                     TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                     sendPacket(ackPacket);
                     
@@ -177,7 +175,7 @@ public class TCPSender {
                     System.out.println("Connection established");
                 }
             } catch (SocketTimeoutException e) {
-                //retransmit SYN
+                // Retransmit SYN
                 System.out.println("Timeout, retransmitting SYN");
                 TCPPacket synPacket2 = new TCPPacket(seqNum - 1, 0, System.nanoTime(), false, true, false, new byte[0]);
                 sendPacket(synPacket2);
@@ -189,51 +187,59 @@ public class TCPSender {
         return connect;
     }
     
-    //send data packet and add to unacked packets
+    // Send data packet and add to unacked packets
     private void sendDataPacket(byte[] data) throws IOException {
         TCPPacket packet = new TCPPacket(nextSeqNum, ackNum, System.nanoTime(), true, false, false, data);
         sendPacket(packet);
         
-        //add to unacked packets
+        // Add to unacked packets
         unackedPackets.put(nextSeqNum, packet);
         
-        //update sequence number
+        // Update sequence number
         nextSeqNum += data.length;
         
-        //update statistics
+        // Update statistics
         dataSent += data.length;
     }
     
-    //send packet
+    // Send packet
     private void sendPacket(TCPPacket packet) throws IOException {
-        //serialize packet
+        // Simulate packet loss for testing (uncomment to enable)
+        /*
+        if (Math.random() < 0.1) { // 10% packet loss
+            System.out.println("Simulated packet loss");
+            return;
+        }
+        */
+        
+        // Serialize packet
         byte[] packetData = packet.toBytes();
         
-        //create UDP packet
+        // Create UDP packet
         DatagramPacket udpPacket = new DatagramPacket(
                 packetData, packetData.length, serverAddr, serverPort);
         
-        //send packet
+        // Send packet
         socket.send(udpPacket);
         packetsSent++;
         
-        //log packet
+        // Log packet
         logPacket("snd", packet);
     }
     
-    //receive and process ACKs
+    // Receive and process ACKs
     private boolean receiveAcks() throws IOException {
         try {
-            //try to receive an ACK
+            // Try to receive an ACK
             byte[] receiveBuffer = new byte[mtu + 24];
             DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
             socket.receive(udpPacket);
             packetsReceived++;
             
-            //deserialize packet
+            // Deserialize packet
             TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
             
-            //verify checksum
+            // Verify checksum
             short receivedChecksum = receivedPacket.checksum;
             receivedPacket.checksum = 0;
             byte[] packetData = receivedPacket.toBytes();
@@ -242,19 +248,19 @@ public class TCPSender {
             if (calculatedChecksum != receivedChecksum) {
                 System.out.println("Checksum error in ACK");
                 checksumErrors++;
-                return true;  //we did receive a packet, even if it had errors
+                return true;  // We did receive a packet, even if it had errors
             }
             
-            //log packet
+            // Log packet
             logPacket("rcv", receivedPacket);
             
-            //process ACK
+            // Process ACK
             if (receivedPacket.ack) {
                 if (receivedPacket.ackNum > baseSeqNum) {
-                    //since we got a new ACK, advance window
+                    // Since we got a new ACK, advance window
                     updateRTT(unackedPackets.get(baseSeqNum));
                     
-                    //remove acknowledged packets
+                    // Remove acknowledged packets
                     for (int seq = baseSeqNum; seq < receivedPacket.ackNum; ) {
                         TCPPacket packet = unackedPackets.get(seq);
                         if (packet != null) {
@@ -265,13 +271,13 @@ public class TCPSender {
                         }
                     }
                     
-                    //update base sequence number
+                    // Update base sequence number
                     baseSeqNum = receivedPacket.ackNum;
                     
-                    //reset duplicate ACK counter
+                    // Reset duplicate ACK counter
                     duplicateAckCount = 0;
                     
-                    //Update congestion window based on current phase
+                    // Update congestion window based on current phase
                     if (inSlowStart) {
                         // Slow start - exponential increase
                         congestionWindow += mtu - 24; // Increase by 1 segment
@@ -290,13 +296,13 @@ public class TCPSender {
                     System.out.println("Window updated - now " + congestionWindow + " bytes");
                     
                 } else if (receivedPacket.ackNum == baseSeqNum) {
-                    //dup ACK
+                    // Duplicate ACK
                     duplicateAckCount++;
                     duplicateAcks++;
                     
-                    //now we implement fast retransmit after 3 duplicate ACKs
+                    // Implement fast retransmit after 3 duplicate ACKs
                     if (duplicateAckCount >= 3) {
-                        //Retransmit the first unacknowledged packet
+                        // Retransmit the first unacknowledged packet
                         TCPPacket lostPacket = unackedPackets.get(baseSeqNum);
                         if (lostPacket != null) {
                             System.out.println("Fast retransmit triggered by 3 duplicate ACKs");
@@ -304,15 +310,15 @@ public class TCPSender {
                             retransmissions++;
                             lostPacket.retransmits++;
                             
-                            //now we implement fast recovery so it gets set to the old congestion window before the collapse which was 1/2
+                            // Implement fast recovery
                             congestionThreshold = congestionWindow / 2;
                             congestionWindow = congestionThreshold;
-                            inSlowStart = false; // now we aren't slow starting and we are in congestion avoidance
+                            inSlowStart = false;
                             
                             System.out.println("Fast recovery - window=" + congestionWindow + 
                                                ", threshold=" + congestionThreshold);
                             
-                            //reset duplicate ACK counter
+                            // Reset duplicate ACK counter
                             duplicateAckCount = 0;
                         }
                     }
@@ -325,19 +331,18 @@ public class TCPSender {
         }
     }
     
-    //check for packets that need retransmission
+    // Check for packets that need retransmission
     private void checkForRetransmissions() throws IOException {
         long currentTime = System.nanoTime();
         
         for (Map.Entry<Integer, TCPPacket> entry : unackedPackets.entrySet()) {
             TCPPacket packet = entry.getValue();
             
-            //check if timeout has occurred
+            // Check if timeout has occurred
             if ((currentTime - packet.timestamp) / 1_000_000 > timeout) {
-                //check if max retransmissions reached
+                // Check if max retransmissions reached
                 if (packet.retransmits < MAX_RETRANSMISSIONS) {
-                    //retransmit
-                    // Create a new packet with updated timestamp
+                    // Retransmit
                     TCPPacket retransPacket = new TCPPacket(
                         packet.seqNum, 
                         packet.ackNum, 
@@ -356,10 +361,10 @@ public class TCPSender {
                     sendPacket(retransPacket);
                     retransmissions++;
                     
-                    // if there's a timeout --> multiplicative decrease
+                    // Timeout --> multiplicative decrease
                     congestionThreshold = congestionWindow / 2; 
-                    congestionWindow = 1; // reset to 1 segment
-                    inSlowStart = true;  // enter slow start again
+                    congestionWindow = 1; // Reset to 1 segment
+                    inSlowStart = true;  // Enter slow start again
                     
                     System.out.println("Timeout - reset window to " + congestionWindow + ", threshold=" + congestionThreshold);
                 } else {
@@ -369,32 +374,32 @@ public class TCPSender {
         }
     }
     
-    //close connection with FIN handshake
+    // Close connection with FIN handshake
     private void closeConnection() throws IOException {
         System.out.println("Closing connection...");
         
-        //create FIN packet
+        // Create FIN packet
         TCPPacket finPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), false, false, true, new byte[0]);
         
         boolean closed = false;
         int attempts = 0;
         
         while (!closed && attempts < MAX_RETRANSMISSIONS) {
-            //send FIN
+            // Send FIN
             sendPacket(finPacket);
-            seqNum++;  //FIN consumes one sequence number
+            seqNum++;  // FIN consumes one sequence number
             
             try {
-                //wait for ACK
+                // Wait for ACK
                 byte[] receiveBuffer = new byte[mtu + 24];
                 DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
                 socket.receive(udpPacket);
                 packetsReceived++;
                 
-                //deserialize packet
+                // Deserialize packet
                 TCPPacket receivedPacket = new TCPPacket(udpPacket.getData());
                 
-                //verify checksum
+                // Verify checksum
                 short receivedChecksum = receivedPacket.checksum;
                 receivedPacket.checksum = 0;
                 byte[] packetData = receivedPacket.toBytes();
@@ -406,35 +411,35 @@ public class TCPSender {
                     continue;
                 }
                 
-                //log packet
+                // Log packet
                 logPacket("rcv", receivedPacket);
                 
-                //check for ACK of our FIN
+                // Check for ACK of our FIN
                 if (receivedPacket.ack && receivedPacket.ackNum == seqNum) {
-                    //got ACK for our FIN
+                    // Got ACK for our FIN
                     
-                    //check if this is also a FIN from the server
+                    // Check if this is also a FIN from the server
                     if (receivedPacket.fin) {
-                        //this is a FIN-ACK, send ACK for the server's FIN
-                        ackNum = receivedPacket.seqNum + 1;  //FIN consumes one sequence number
+                        // This is a FIN-ACK, send ACK for the server's FIN
+                        ackNum = receivedPacket.seqNum + 1;  // FIN consumes one sequence number
                         TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                         sendPacket(ackPacket);
                         closed = true;
                     } else {
-                        //just an ACK, wait for FIN from server
+                        // Just an ACK, wait for FIN from server
                         continue;
                     }
                 }
-                //if we got a separate FIN from the server
+                // If we got a separate FIN from the server
                 else if (receivedPacket.fin) {
-                    //send ACK for the FIN
+                    // Send ACK for the FIN
                     ackNum = receivedPacket.seqNum + 1;
                     TCPPacket ackPacket = new TCPPacket(seqNum, ackNum, System.nanoTime(), true, false, false, new byte[0]);
                     sendPacket(ackPacket);
                     closed = true;
                 }
             } catch (SocketTimeoutException e) {
-                //retransmit FIN
+                // Retransmit FIN
                 System.out.println("Timeout, retransmitting FIN");
                 attempts++;
                 
@@ -446,11 +451,11 @@ public class TCPSender {
         if (closed) {
             System.out.println("Connection closed");
         } else {
-            System.out.println("WARNING: CHECK IF CONNECTION CLOSED");
+            System.out.println("WARNING: CONNECTION MAY NOT HAVE CLOSED PROPERLY");
         }
     }
     
-    //update RTT estimates
+    // Update RTT estimates
     private void updateRTT(TCPPacket packet) {
         if (packet == null) return;
         
@@ -475,7 +480,7 @@ public class TCPSender {
                            (int)estimatedRTT + "ms, timeout: " + timeout + "ms");
     }
     
-    //log packet
+    // Log packet
     private void logPacket(String action, TCPPacket packet) {
         StringBuilder flagStr = new StringBuilder();
         
@@ -502,7 +507,7 @@ public class TCPSender {
                           packet.ackNum);
     }
     
-    //print statistics
+    // Print statistics
     private void printStatistics() {
         System.out.println("\nTransfer Statistics:");
         System.out.println("Amount of Data transferred: " + dataSent + " bytes");
