@@ -14,11 +14,20 @@ import java.util.Queue;
 
 
 
+/*
+ * Header: 4 + 4 + 8 + 4 + 2 + 2 = 24 bytes
+ * 1. client initialization: create port bound to local port, set server addr n port, init seq #s, set socket for retransmissions,
+ * init the sliding window parameters
+ * 2.establish connection: syn from us with seq#0 as we are establishing the connection, send to receiver and increase the sequence number
+ * Receive syn + ack, if there's a timeout, retransmit the last SYN packet, if it comes back, then we verify the checksum and the correct 
+ * flags set, and then verify the ACK matches our seqNum
+ * Ack back to server with server's SeqNum + 1
+ * 2. Data transmission: read correct amount of bytes
+ */
 public class TCPSender{
     private static final byte SYN_FLAG = 0x4;
     private static final byte ACK_FLAG = 0x1;
     private static final byte FIN_FLAG = 0x2;
-    private static final byte DATA_FLAG = 0x0;
     private static final int timeout = 5000;
     private Map<Integer, TCPPacket> unackedPackets = new HashMap<>(); //retransmissions
     private static final int MAX_RETRANSMISSIONS = 16;
