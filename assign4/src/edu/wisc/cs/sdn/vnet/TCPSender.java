@@ -24,13 +24,12 @@ import java.util.Queue;
  * Ack back to server with server's SeqNum + 1
  * 2. Data transmission: read correct amount of bytes
  */
-public class TCPSender{
+public class TCPSender {
     private static final byte SYN_FLAG = 0x4;
     private static final byte ACK_FLAG = 0x1;
     private static final byte FIN_FLAG = 0x2;
-    private static final int timeout = 5000;
-    private Map<Integer, TCPPacket> unackedPackets = new HashMap<>(); //retransmissions
     private static final int MAX_RETRANSMISSIONS = 16;
+    private static final int INITIAL_TIMEOUT = 5000; // 5 seconds
 
     //connection
     private int seqNum = 0;
@@ -38,14 +37,28 @@ public class TCPSender{
     private int baseSeqNum = 0; //first unacked Byte
     private int nextSeqNum = 0;
 
+    //congestion control
+    private int congestionWindow = 1; // Start with 1 MSS (Maximum Segment Size)
+    private int congestionThreshold; // ssthresh - transition point between slow start and CA
+    private boolean inSlowStart = true; // Track if we're in slow start or congestion avoidance
+    private int duplicateAckCount = 0; // For fast retransmit
+
     private DatagramSocket socket;
     private InetAddress serverAddr;
     private int serverPort;
 
     // Sliding window parameters
     private int mtu;
-    private int sws;  // Sliding window size in segments
-    private int cwnd; // Congestion window in bytes
+    private int timeout = INITIAL_TIMEOUT; // Current timeout value
+
+    // RTT estimation
+    private double estimatedRTT = 0;
+    private double devRTT = 0;
+    private static final double ALPHA = 0.875; // For EWMA of RTT
+    private static final double BETA = 0.75;   // For EWMA of RTT variance
+
+    // Packet storage
+    private Map<Integer, TCPPacket> unackedPackets = new HashMap<>(); //retransmissions
 
     //stats to display
     private long dataSent = 0;
@@ -83,34 +96,34 @@ public class TCPSender{
             }
             
             byte[] packetData = new byte[packetLength];
-            ByteBuffer bb = ByteBuffer.wrap(packetData);
+            ByteBuffer bufByt = ByteBuffer.wrap(packetData);
             
             // Fill header fields
-            bb.putInt(seqNum);
-            bb.putInt(ackNum);
-            bb.putLong(timestamp);
+            bufByt.putInt(seqNum);
+            bufByt.putInt(ackNum);
+            bufByt.putLong(timestamp);
             
             // Length and flags (length in upper 29 bits, flags in lower 3 bits)
             int dataLength = (data != null) ? data.length : 0;
             int lengthAndFlags = (dataLength << 3) | (flags & 0x7);
-            bb.putInt(lengthAndFlags);
+            bufByt.putInt(lengthAndFlags);
             
             // Placeholder for checksum (will be filled in later)
-            bb.putShort((short)0);
+            bufByt.putShort((short)0);
             
             // Zero padding for the remaining 2 bytes
-            bb.putShort((short)0);
+            bufByt.putShort((short)0);
             
             // Add data if any
             if (data != null && data.length > 0) {
-                bb.put(data);
+                bufByt.put(data);
             }
             
             // Calculate checksum
             this.checksum = calculateChecksum(packetData);
             
             // Update checksum in the packet
-            bb.putShort(20, this.checksum);
+            bufByt.putShort(20, this.checksum);
             
             return packetData;
         }
@@ -122,10 +135,10 @@ public class TCPSender{
         this.serverPort = serverPort;
         this.mtu = mtu;
         this.sws = sws;
-        this.cwnd = mtu * sws;
-        this.seqNum = 0;
-        this.baseSeqNum = 0;
-        this.nextSeqNum = 0;
+        
+        //init congestion control
+        this.congestionWindow = 1; // Start with 1 segment
+        this.congestionThreshold = 65535; //infinity as max
         
         //timeout for socket
         this.socket.setSoTimeout(timeout);
@@ -137,43 +150,45 @@ public class TCPSender{
             System.err.println("Failed to establish connection");
             return;
         }
-        
+        //being streaming of data
+        System.out.println("Beginning to read data from file " + filename);
         FileInputStream fileIn = new FileInputStream(filename);
-        byte[] buffer = new byte[mtu - 24]; // header space
+        byte[] buffer = new byte[mtu - 24]; 
         int bytesRead;
         
         //send data
         while ((bytesRead = fileIn.read(buffer)) > 0) {
-            byte[] data = new byte[bytesRead]; //copy it for buffer reuse
+            byte[] data = new byte[bytesRead];
             System.arraycopy(buffer, 0, data, 0, bytesRead);
             
             //wait until window allows sending
-            while (nextSeqNum - baseSeqNum >= cwnd) {
+            while ((nextSeqNum - baseSeqNum) >= getEffectiveWindow()) {
                 if (!receiveAcks()) {
-                    //check for retransmissions if no ACKs received
+                    //look for retransmissions if no ACKs received
                     checkForRetransmissions();
                 }
-            }
-            
+            }  
             sendDataPacket(data);
             
             //incoming ACKs
             receiveAcks();
         }
-        
         fileIn.close();
-        
         while (baseSeqNum < nextSeqNum) { //make sure we have all data
             if (!receiveAcks()) {
                 checkForRetransmissions();
             }
         }
-        
         closeConnection();
         printStatistics();
     }
 
-    private boolean establishConnection() throws IOException{
+    // we want the effective window size (minimum of congestion window and flow control window)
+    private int getEffectiveWindow() {
+        return congestionWindow;
+    }
+
+    private boolean establishConnection() throws IOException {
         System.out.println("Establishing Connection...");
 
         //syn
@@ -188,6 +203,7 @@ public class TCPSender{
         
         while (!connect && tries < MAX_RETRANSMISSIONS) {
             try {
+                //receive packet
                 byte[] receiveBuffer = new byte[mtu + 24];
                 DatagramPacket udpPacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
                 socket.receive(udpPacket);
@@ -232,7 +248,7 @@ public class TCPSender{
                     System.out.println("Connection established");
                 }
             } catch (SocketTimeoutException e) {
-                //Retransmit SYN
+                //retransmit SYN
                 System.out.println("Timeout, retransmitting SYN");
                 TCPPacket synPacket2 = new TCPPacket(seqNum - 1, 0, SYN_FLAG, null);
                 sendPacket(synPacket2);
@@ -293,7 +309,7 @@ public class TCPSender{
             ByteBuffer buf = ByteBuffer.wrap(udpPacket.getData(), 0, udpPacket.getLength());
             int rcvSeqNum = buf.getInt();
             int rcvAckNum = buf.getInt();
-            long timestamp = buf.getLong();
+//            long timestamp = buf.getLong();
             int lengthAndFlags = buf.getInt();
             short checksum = buf.getShort();
             
@@ -319,8 +335,9 @@ public class TCPSender{
             
             //process ACK
             if ((flags & ACK_FLAG) != 0) {
-                if (rcvAckNum > baseSeqNum) { //new ack so update the RTT
-                    updateRTT(timestamp);
+                if (rcvAckNum > baseSeqNum) {
+                    //since we got a new ACK, advance window
+                    updateRTT(unackedPackets.get(baseSeqNum));
                     
                     //remove acknowledged packets
                     for (int seq = baseSeqNum; seq < rcvAckNum; ) {
@@ -337,22 +354,53 @@ public class TCPSender{
                     baseSeqNum = rcvAckNum;
                     
                     //reset duplicate ACK counter
-                    duplicateAcks = 0;
+                    duplicateAckCount = 0;
+                    
+                    //Update congestion window based on current phase
+                    if (inSlowStart) {
+                        // Slow start - exponential increase
+                        congestionWindow += mtu - 24; // Increase by 1 segment
+                        
+                        // Check if we should transition to congestion avoidance
+                        if (congestionWindow >= congestionThreshold) {
+                            inSlowStart = false;
+                            System.out.println("Transitioning from slow start to congestion avoidance at window=" + 
+                                               congestionWindow + ", threshold=" + congestionThreshold);
+                        }
+                    } else {
+                        // Congestion avoidance - additive increase
+                        // Increase window by roughly 1 segment per RTT
+                        // congestionWindow += (mtu - 24) * (mtu - 24) / congestionWindow;
+                        congestionWindow += mtu - 24;
+                    }
+                    
+                    System.out.println("Window updated - now " + congestionWindow + " bytes");
+                    
                 } else if (rcvAckNum == baseSeqNum) {
                     //dup ACK
+                    duplicateAckCount++;
                     duplicateAcks++;
                     
-                    //fast retransmit after 3 duplicate ACKs
-                    if (duplicateAcks >= 3) {
-                        TCPPacket lostPacket = unackedPackets.get(baseSeqNum); 
-                        if (lostPacket != null) {//retransmit
+                    //now we implement fast retransmit after 3 duplicate ACKs
+                    if (duplicateAckCount >= 3) {
+                        //Retransmit the first unacknowledged packet
+                        TCPPacket lostPacket = unackedPackets.get(baseSeqNum);
+                        if (lostPacket != null) {
                             System.out.println("Fast retransmit triggered by 3 duplicate ACKs");
                             sendPacket(lostPacket);
                             retransmissions++;
                             lostPacket.retransmits++;
                             
+                            //now we implement fast recovery so it gets set to the old congestion window before the collapse which was 1/2
+                            congestionThreshold = congestionWindow / 2;
+                            congestionWindow = congestionThreshold;
+                            inSlowStart = false; // now we aren't slow starting and we are in congestion avoidance
+                            
+                            System.out.println("Fast recovery - window=" + congestionWindow + 
+                                               ", threshold=" + congestionThreshold);
+                            
                             //reset duplicate ACK counter
-                            duplicateAcks = 0;
+                            duplicateAckCount = 0;
                         }
                     }
                 }
@@ -375,9 +423,17 @@ public class TCPSender{
             if ((currentTime - packet.timestamp) / 1_000_000 > timeout) {
                 //check if max retransmissions reached
                 if (packet.retransmits < MAX_RETRANSMISSIONS) {
+                    //retransmit
                     sendPacket(packet);
                     retransmissions++;
                     packet.retransmits++;
+                    
+                    // if there's a timeout --> multiplicative decrease
+                    congestionThreshold = congestionWindow / 2; 
+                    congestionWindow = 1; // reset to 1 segment
+                    inSlowStart = true;  // enter slow start again
+                    
+                    System.out.println("Timeout - reset window to " + congestionWindow + ", threshold=" + congestionThreshold);
                 } else {
                     throw new IOException("Max retransmissions reached for packet with seq " + packet.seqNum);
                 }
@@ -411,7 +467,6 @@ public class TCPSender{
                 ByteBuffer buf = ByteBuffer.wrap(udpPacket.getData(), 0, udpPacket.getLength());
                 int rcvSeqNum = buf.getInt();
                 int rcvAckNum = buf.getInt();
-                long timestamp = buf.getLong();
                 int lengthAndFlags = buf.getInt();
                 short checksum = buf.getShort();
                 
@@ -468,7 +523,7 @@ public class TCPSender{
         if (closed) {
             System.out.println("Connection closed");
         } else {
-            System.out.println("Warning: Connection may not have closed properly");
+            System.out.println("WARNING: CHECK IF CONNECTION CLOSED");
         }
     }
     
@@ -499,8 +554,28 @@ public class TCPSender{
     }
     
     //update RTT estimates
-    private void updateRTT(long timestamp) {
-        //TODO: Implement RTT estimation using the EWMA method from the assignment
+    private void updateRTT(TCPPacket packet) {
+        if (packet == null) return;
+        
+        long sampleRTT = (System.nanoTime() - packet.timestamp) / 1_000_000; // Convert to ms
+        
+        if (estimatedRTT == 0) {
+            estimatedRTT = sampleRTT;
+            devRTT = sampleRTT / 2;
+        } else {
+            // EWMA (Exponentially Weighted Moving Average)
+            double oldEstimatedRTT = estimatedRTT;
+            estimatedRTT = ALPHA * estimatedRTT + (1 - ALPHA) * sampleRTT;
+            devRTT = BETA * devRTT + (1 - BETA) * Math.abs(sampleRTT - oldEstimatedRTT);
+        }
+        
+        timeout = (int)(estimatedRTT + 4 * devRTT);
+        
+        if (timeout < 100) timeout = 100;  // min 100ms
+        if (timeout > 60000) timeout = 60000;  // max 60 seconds
+        
+        System.out.println("RTT updated - sample: " + sampleRTT + "ms, estimated: " + 
+                           (int)estimatedRTT + "ms, timeout: " + timeout + "ms");
     }
     
     //log packet
